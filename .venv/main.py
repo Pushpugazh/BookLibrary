@@ -1,9 +1,10 @@
 from fastapi import FastAPI, Depends, HTTPException, status, Path, Body
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
+from datetime import datetime
 
 from database import engine, sessionLocal, Base
-from models import User, UserCreate, UserLogin, Books, BookCreate, BookResponse, BookUpdate, BookReturn
+from models import User, Books, BookHistory, UserCreate, UserLogin, BookCreate, BookResponse, BookUpdate, BookReturn, HistoryCreate, HistoryResponse
 from auth import hash_password, get_jwt_token, verify_password, get_current_user
 
 app = FastAPI()
@@ -149,11 +150,20 @@ async def borrow_book(book_id: int = Path(..., title="ID of the book to update")
         if book.count <= 0:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Book not available for borrowing")
 
-        book.borrower_id = email
+        # book.borrower_id = email
         book.count -= 1
         db.commit()
 
-        return {"message": "Book has been borrowed", "borrowed book": book.title}
+        borrow_history_entry = BookHistory(book_id = book.id,
+                                           user_id = email,
+                                            action_type = "borrow"
+                                           )
+        db.add(borrow_history_entry)
+        db.commit()
+
+        return {"message": "Book has been borrowed",
+                "borrowed book": book.title
+                }
 
     except HTTPException as httpexception:
         return httpexception
@@ -175,22 +185,30 @@ async def return_book_by_id(book_id: int = Path(..., title="ID of the book to up
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin cannot return book")
 
         book = db.query(Books).filter(Books.id == book_id).first()
-        print(count.return_count)
         if not book:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Book not found")
-        print("before the condition")
         if count.return_count < 0:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
                                 detail="Invalid return count. Must be a non-negative integer.")
-        print("before the 2 condition")
         if count.return_count > 0:
-            print("entering..")
             book.count += count.return_count
             db.commit()
             db.refresh(book)
 
-        # return {"message": "The book is returned"}
-        return {"message": f"{count.return_count} book(s) returned successfully", "book": book}
+        borrowed_book = db.query(BookHistory).filter(BookHistory.book_id == book_id).first()
+        print("query is getting through")
+
+        if not borrowed_book:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Book not borrowed by the user")
+        print("Returning..")
+        returned_datetime = datetime.utcnow()
+        print("returned..")
+        print(returned_datetime)
+        borrowed_book.returned = f"returned on {returned_datetime}"
+
+        db.commit()
+
+        return {"message": f"{count.return_count} book(s) returned successfully", "book": book.title}
 
     except HTTPException as httpexception:
         return httpexception
@@ -252,29 +270,72 @@ async def delete_all_users(db: Session = Depends(get_db),
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/user/books", response_model=list[BookCreate])
-async def get_borrowed_books(db: Session = Depends(get_db),
-                             current_user: User = Depends(get_current_user)
-                             ):
+@app.get("/api/user/book", response_model=None)
+async def get_user_books(db: Session = Depends(get_db),
+                         current_user: tuple[str, bool] = Depends(get_current_user),
+                         ):
     try:
         email, is_admin = current_user
         if is_admin:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin cannot borrow books")
 
-        # user = get_user_by_email(db, email)
-        user = db.query(User).filter(User.email == email).first()
-        if not user:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        borrowed_books = (db.query(BookHistory, Books).join(Books).filter(
+                    BookHistory.user_id == email,
+                            BookHistory.returned == 'no').all()
+                          )
 
-        borrowed_books = user.borrowed_books
-        return borrowed_books
+        if not borrowed_books:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Books not borrowed by the user")
+
+        book_ids = [{"title" : bookinstance.title,
+                     "book_id" : historyentry.book_id,
+                     "borrowed_on" : historyentry.action_data
+                     } for historyentry, bookinstance in borrowed_books]
+
+        return book_ids
+
 
     except HTTPException as httpexception:
         return httpexception
 
     except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                            detail=f"Internal Server Error: {str(e)}")
+        return HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Internal Server Error: {str(e)}")
+
+
+@app.get('/api/history', response_model= None)
+async def retrieve_book_user_history(db: Session = Depends(get_db),
+                                     user_details : HistoryCreate = Body(...),
+                                     current_user: tuple[str, bool] = Depends(get_current_user)):
+    try:
+        _, is_admin = current_user
+        if not is_admin:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin Access Required")
+
+        if not user_details.email:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email is required")
+        # : email, book_title, type(borrow return), date
+        history = db.query(BookHistory, Books).join(Books).filter(
+                                                            BookHistory.user_id == user_details.email).all()
+        if not history:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail= "user details not found")
+
+        history_response = [
+            {"user_email": user_details.email,
+             "book_details": {
+                 "title" : bookinstance.title,
+                 "action_type" : historyinstance.action_type,
+                 "returned" : historyinstance.returned
+             }
+             } for historyinstance, bookinstance in history
+        ]
+
+        return history_response
+
+    except HTTPException as httpexception:
+        return httpexception
+
+    except Exception as e:
+        return HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Internal Server Error: {str(e)}")
 
 
 '''
