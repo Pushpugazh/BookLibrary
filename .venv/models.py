@@ -15,7 +15,7 @@ class User(Base):
     email = Column(String(255), unique=True, index=True)
     password = Column(String(255))
     is_admin = Column(Boolean, default=False)
-    # created_at = Column(DateTime(timezone=True), server_default=func.now())
+
     books = relationship('Books', back_populates='borrower', foreign_keys='Books.borrower_id')
     borrowed_books = relationship('Books', back_populates='borrower', foreign_keys='Books.borrower_id',
                                   overlaps='books')
@@ -29,9 +29,20 @@ class Books(Base):
     description = Column(String(255))
     author = Column(String(255))
     count = Column(Integer)
-    # borrower_id = Column(String(255), nullable=True)
+
     borrower_id = Column(Integer, ForeignKey('users.id'))
     borrower = relationship('User', back_populates='books')
+
+
+class BookHistory(Base):
+    __tablename__ = "bookhistory"
+
+    id = Column(Integer, primary_key=True, index=True)
+    book_id = Column(Integer, ForeignKey('books.id'))
+    user_id = Column(String, ForeignKey('users.email'))
+    action_type = Column(String(255))
+    action_data = Column(DateTime, server_default=func.now())
+    returned = Column(String, default='no')
 
 #pydantic model
 class UserCreate(BaseModel):
@@ -64,3 +75,13 @@ class BookResponse(BookCreate):
 class BookReturn(BaseModel):
     return_count : int
 
+class HistoryCreate(BaseModel):
+    email : Optional[str] = Field(None)
+    book_title : Optional[str] = Field(None)
+    action_type : Optional[str] = Field(None)
+
+class HistoryResponse(BaseModel):
+    email : str
+    title : str
+    action_type : str
+    action_date : str
